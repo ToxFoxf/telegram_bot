@@ -27,7 +27,7 @@ async def start(message: Message):
     builder.add(
         types.InlineKeyboardButton(
             text="Ники игроков",
-            callback_data="button3"
+            callback_data="button3" 
         )
     )
     await message.answer("Тыкай",reply_markup=builder.as_markup())
