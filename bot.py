@@ -21,7 +21,7 @@ cursor.execute('''CREATE TABLE IF NOT EXISTS members
 cursor.execute('''CREATE TABLE IF NOT EXISTS coords
                   (id INTEGER PRIMARY KEY, name TEXT, coords TEXT, access_level INTEGER)''')
 cursor.execute('''CREATE TABLE IF NOT EXISTS blacklist
-                  (nickname TEXT PRIMARY KEY, reason TEXT)''')
+                  (user_id INTEGER PRIMARY KEY, nickname TEXT, reason TEXT)''')
 conn.commit()
 
 @dp.message(Command("start"))
@@ -37,53 +37,109 @@ async def start(message: Message):
 
 @dp.message(Command("ban"))
 async def ban_player(message: Message, command: CommandObject):
+    if not message.reply_to_message:
+        await message.answer("Используйте команду в ответ на сообщение пользователя, которого нужно забанить.")
+        return
+
     try:
-        nickname, reason = command.args.split(maxsplit=1)
-        cursor.execute("INSERT INTO blacklist VALUES (?, ?)", (nickname, reason))
+        user = message.reply_to_message.from_user
+        reason = command.args if command.args else "без указания причины"
+
+        cursor.execute("INSERT OR REPLACE INTO blacklist (user_id, nickname, reason) VALUES (?, ?, ?)", 
+                      (user.id, user.username, reason))
         conn.commit()
-        await message.answer(f"{nickname} добавлен в ЧС")
-    except:
-        await message.answer("Формат: /ban ник причина")
+
+        try:
+            await bot.ban_chat_member(
+                chat_id=message.chat.id,
+                user_id=user.id
+            )
+            ban_text = f"Пользователь @{user.username or user.id} забанен и добавлен в ЧС. Причина: {reason}"
+        except Exception as kick_error:
+            ban_text = f"Пользователь @{user.username or user.id} добавлен в ЧС, но не удалён из чата. Ошибка: {kick_error}"
+        
+        await message.answer(ban_text)
+        
+    except Exception as e:
+        await message.answer(f"Ошибка: {str(e)}")
 
 @dp.message(Command("unban"))
 async def unban_player(message: Message, command: CommandObject):
-    nickname = command.args
-    cursor.execute("DELETE FROM blacklist WHERE nickname=?", (nickname,))
-    conn.commit()
-    await message.answer(f"{nickname} удалён из ЧС")
+    if not command.args:
+        await message.answer("Укажите username или ID пользователя для разблокировки.")
+        return
+
+    try:
+        user_identifier = command.args.strip()
+
+        if user_identifier.isdigit():
+            cursor.execute("SELECT * FROM blacklist WHERE user_id = ?", (int(user_identifier),))
+        else:
+            cursor.execute("SELECT * FROM blacklist WHERE nickname = ?", (user_identifier,))
+
+        user = cursor.fetchone()
+
+        if not user:
+            await message.answer(f"Пользователь {user_identifier} не найден в черном списке.")
+            return
+
+        cursor.execute("DELETE FROM blacklist WHERE user_id = ?", (user[0],))
+        conn.commit()
+
+        try:
+            await bot.unban_chat_member(
+                chat_id=message.chat.id,
+                user_id=user[0]
+            )
+            unban_text = f"Пользователь {user_identifier} разбанен и удален из ЧС."
+        except Exception as unban_error:
+            unban_text = f"Пользователь {user_identifier} удален из ЧС, но не разбанен в чате. Ошибка: {unban_error}"
+
+        await message.answer(unban_text)
+
+    except Exception as e:
+        await message.answer(f"Ошибка: {str(e)}")
 
 @dp.message(Command("blacklist"))
 async def show_blacklist(message: Message):
-    cursor.execute("SELECT * FROM blacklist")
+    cursor.execute("SELECT user_id, nickname, reason FROM blacklist")
     rows = cursor.fetchall()
     if not rows:
         await message.answer("ЧС пуст")
         return
-    result = "Чёрный список:\n" + "\n".join(f"{row[0]} — {row[1]}" for row in rows)
+    result = "Чёрный список:\n" + "\n".join(
+        f"ID: {row[0]} (@{row[1] or 'без ника'}) — {row[2]}" for row in rows
+    )
     await message.answer(result)
 
 @dp.message(Command("add_member"))
 async def add_member(message: Message, command: CommandObject):
-    if not command.args:
-        await message.answer("Формат: /add_member @username уровень доступа")
+    if not message.reply_to_message:
+        await message.answer("Используйте команду в ответ на сообщение пользователя, которого нужно добавить.")
         return
 
     try:
-        username, level = command.args.split()
-        level = int(level)
+        user = message.reply_to_message.from_user
+        args = command.args.split()
+        if len(args) != 1:
+            await message.answer("Формат: /add_member уровень_доступа (в ответ на сообщение пользователя)")
+            return
         
+        level = int(args[0])
         if level not in {1, 2, 3}:
             await message.answer("Уровень доступа должен быть: 1 (новичок), 2 (проверенный), 3 (лидер)")
             return
         
         cursor.execute(
-            "INSERT OR REPLACE INTO members (username, trust_level) VALUES (?, ?)",
-            (username, level))
+            "INSERT OR REPLACE INTO members (user_id, username, trust_level) VALUES (?, ?, ?)",
+            (user.id, user.username, level))
         conn.commit()
         
-        await message.answer(f"{username} добавлен с уровнем доступа {level}")
+        await message.answer(f"@{user.username} добавлен с уровнем доступа {level}")
     except ValueError:
-        await message.answer("Ошибка. Формат: /add_member @username уровень (1-3)")
+        await message.answer("Ошибка. Формат: /add_member уровень (1-3) в ответ на сообщение")
+    except Exception as e:
+        await message.answer(f"Ошибка: {str(e)}")
 
 @dp.message(Command("set_level"))
 async def set_level(message: Message, command: CommandObject):
@@ -118,7 +174,7 @@ async def check_access(username: str, required_level: int) -> bool:
 async def get_coords(message: Message):
     username = message.from_user.username
     
-    if not await check_access(username, 2):  # Требуется уровень 2+
+    if not await check_access(username, 2):
         await message.answer("Доступ запрещён!")
         return
     
@@ -129,19 +185,44 @@ async def get_coords(message: Message):
 
 @dp.message(Command("members"))
 async def list_members(message: Message):
-    cursor.execute("SELECT username, trust_level FROM members ORDER BY trust_level DESC")
+    cursor.execute("SELECT user_id, username, trust_level FROM members ORDER BY trust_level DESC")
     members = cursor.fetchall()
     
     if not members:
         await message.answer("В базе нет участников")
         return
     
+    active_members = []
+    
+    for user_id, username, trust_level in members:
+        try:
+            if not isinstance(user_id, int) or user_id <= 0:
+                print(f"Некорректный user_id: {user_id} для пользователя {username}. Пропускаем.")
+                continue
+
+            chat_member = await bot.get_chat_member(chat_id=message.chat.id, user_id=user_id)
+            
+            if chat_member.status not in ['left', 'kicked']:
+                active_members.append((username, trust_level))
+            else:
+                cursor.execute("DELETE FROM members WHERE user_id = ?", (user_id,))
+                conn.commit()
+                print(f"Пользователь {username} (ID: {user_id}) удалён из базы, так как его нет в группе.")
+        
+        except Exception as e:
+            print(f"Ошибка при проверке пользователя {username} (ID: {user_id}): {str(e)}")
+            continue
+    
+    if not active_members:
+        await message.answer("В базе нет участников")
+        return
+    
     response = "📜 Список участников:\n" + "\n".join(
         f"{username} — {['Новичок', 'Проверенный', 'Лидер'][level-1]}" 
-        for username, level in members
+        for username, level in active_members
     )
     await message.answer(response)
-    
+
 @dp.message(Command("add_coords"))
 async def add_coords(message: Message, command: CommandObject):
     if not command.args:
@@ -170,17 +251,23 @@ async def add_coords_menu(callback: CallbackQuery):
     )
     await callback.answer()
 
-    
+@dp.message(Command("add_coords"))
+async def add_coords_command(message: Message, command: CommandObject):
     try:
         name, x, y, z, access_level = command.args.split()
         encrypted = cipher.encrypt(f"{x} {y} {z}".encode())
+        
         cursor.execute(
             "INSERT INTO coords (name, coords, access_level) VALUES (?, ?, ?)",
-            (name, encrypted.decode(), int(access_level)),
-        conn.commit())
-        await message.answer(f" Координаты '{name}' сохранены (требуемый уровень: {access_level})")
+            (name, encrypted.decode(), int(access_level))
+        )
+        conn.commit()
+        
+        await message.answer(f"Координаты '{name}' сохранены (требуемый уровень: {access_level})")
+    except ValueError:
+        await message.answer("Ошибка формата. Используйте: /add_coords Название X Y Z Уровень Доступа")
     except Exception as e:
-        await message.answer(f"Ошибка: {e}")
+        await message.answer(f"Ошибка: {str(e)}")
 
 @dp.message(Command("base"))
 async def base(message: Message):
@@ -196,20 +283,10 @@ async def idea_command(message: Message, command: CommandObject):
 @dp.callback_query(F.data == "button1")
 async def button1(callback: CallbackQuery):
     builder = InlineKeyboardBuilder()
-
     builder.add(
-        types.InlineKeyboardButton(
-            text="надо построить",
-            callback_data="need_build"
-        ),
-        types.InlineKeyboardButton(
-            text="уже построили",
-            callback_data="already_built"
-        ),
-        types.InlineKeyboardButton(
-            text="идея для построек",
-            callback_data="idea"
-        )
+        types.InlineKeyboardButton(text="надо построить", callback_data="need_build"),
+        types.InlineKeyboardButton(text="уже построили", callback_data="already_built"),
+        types.InlineKeyboardButton(text="идея для построек", callback_data="idea")
     )
     await callback.message.edit_text(
         "Выберите категорию:",
@@ -220,7 +297,6 @@ async def button1(callback: CallbackQuery):
 @dp.callback_query(F.data == "button2")
 async def button2(callback: CallbackQuery):
     builder = InlineKeyboardBuilder()
-
     builder.add(
         types.InlineKeyboardButton(
             text="YouTube",
@@ -235,10 +311,10 @@ async def button2(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "button3")
 async def nickaname(callback: CallbackQuery):
-        with open("nickname.txt", "r") as msg:
-            otv = msg.read()
-        await callback.message.answer(otv)
-        await callback.answer()
+    with open("nickname.txt", "r") as msg:
+        otv = msg.read()
+    await callback.message.answer(otv)
+    await callback.answer()
 
 @dp.callback_query(F.data == "need_build")
 async def need_build(callback: CallbackQuery):
