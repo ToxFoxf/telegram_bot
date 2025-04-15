@@ -112,8 +112,22 @@ async def show_blacklist(message: Message):
     )
     await message.answer(result)
 
+# Добавляем функцию check_access
+async def check_access(username: str, required_level: int) -> bool:
+    cursor.execute(
+        "SELECT trust_level FROM members WHERE username = ?",
+        (username,))
+    result = cursor.fetchone()
+    return result and result[0] >= required_level
+
 @dp.message(Command("add_member"))
 async def add_member(message: Message, command: CommandObject):
+    # Проверяем уровень доступа вызывающего пользователя
+    username = message.from_user.username
+    if not await check_access(username, 3):
+        await message.answer("У вас недостаточно прав для выполнения этой команды. Требуется уровень доступа: Лидер (3).")
+        return
+
     if not message.reply_to_message:
         await message.answer("Используйте команду в ответ на сообщение пользователя, которого нужно добавить.")
         return
@@ -143,6 +157,12 @@ async def add_member(message: Message, command: CommandObject):
 
 @dp.message(Command("set_level"))
 async def set_level(message: Message, command: CommandObject):
+    # Проверяем уровень доступа вызывающего пользователя
+    username = message.from_user.username
+    if not await check_access(username, 3):
+        await message.answer("У вас недостаточно прав для выполнения этой команды. Требуется уровень доступа: Лидер (3).")
+        return
+
     try:
         username, new_level = command.args.split()
         new_level = int(new_level)
@@ -162,13 +182,6 @@ async def set_level(message: Message, command: CommandObject):
             await message.answer(f"{username} теперь имеет уровень {new_level}")
     except:
         await message.answer("Формат: /set_level @username новый уровень")
-
-async def check_access(username: str, required_level: int) -> bool:
-    cursor.execute(
-        "SELECT trust_level FROM members WHERE username = ?",
-        (username,))
-    result = cursor.fetchone()
-    return result and result[0] >= required_level
 
 @dp.message(Command("get_coords"))
 async def get_coords(message: Message):
