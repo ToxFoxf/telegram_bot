@@ -145,6 +145,15 @@ async def add_member(message: Message, command: CommandObject):
             return
         
         cursor.execute(
+            "SELECT trust_level FROM members WHERE user_id = ?",
+            (user.id,))
+        existing_member = cursor.fetchone()
+
+        if existing_member and existing_member[0] == level:
+            await message.answer(f"Игрок @{user.username} уже добавлен с уровнем доступа {level}.")
+            return
+        
+        cursor.execute(
             "INSERT OR REPLACE INTO members (user_id, username, trust_level) VALUES (?, ?, ?)",
             (user.id, user.username, level))
         conn.commit()
